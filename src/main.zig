@@ -203,7 +203,8 @@ pub fn main() !void {
                     },
                 };
                 perf_fd.* = std.posix.perf_event_open(&attr, 0, -1, perf_fds[0], PERF.FLAG.FD_CLOEXEC) catch |err| {
-                    std.debug.panic("unable to open perf event: {s}\n", .{@errorName(err)});
+                    reportPerfEventOpenError(err);
+                    std.process.exit(1);
                 };
             }
 
@@ -411,6 +412,51 @@ fn readPerfFd(fd: fd_t) usize {
     };
     assert(n == @sizeOf(usize));
     return result;
+}
+
+fn reportPerfEventOpenError(err: std.posix.PerfEventOpenError) void {
+    std.debug.print("unable to open perf event: {s}\n", .{@errorName(err)});
+    if (err != error.PermissionDenied) return;
+
+    const paranoid_value = blk: {
+        const file = std.fs.openFileAbsolute("/proc/sys/kernel/perf_event_paranoid", .{}) catch |perr| {
+            std.log.err("unable to open /proc/sys/kernel/perf_event_paranoid: {s}\n", .{@errorName(perr)});
+            std.process.exit(1);
+        };
+        var buffer: [10]u8 = undefined;
+        const len = file.readAll(&buffer) catch |e| {
+            std.log.err("unable to read from /proc/sys/kernel/perf_event_paranoid: {s}\n", .{@errorName(e)});
+            std.process.exit(1);
+        };
+        if (buffer[len - 1] != '\n') {
+            std.log.err("/proc/sys/kernel/perf_event_paranoid contains unexpected content\n", .{});
+        }
+        break :blk std.fmt.parseInt(isize, buffer[0 .. len - 1], 10) catch {
+            std.log.err("/proc/sys/kernel/perf_event_paranoid contains unexpected content\n", .{});
+            std.process.exit(1);
+        };
+    };
+
+    std.debug.print(
+        \\
+        \\Access to performance monitoring and observability operations is limited. Consider adjusting
+        \\/proc/sys/kernel/perf_event_paranoid setting to open access to performance monitoring and
+        \\observability operations for processes without CAP_PERFMON, CAP_SYS_PTRACE or CAP_SYS_ADMIN Linux
+        \\capability. More information can be found at 'Perf events and tool security' document:
+        \\https://www.kernel.org/doc/html/latest/admin-guide/perf-security.html
+        \\
+        \\The current perf_event_paranoid setting is {[current]}. Consider decreasing this setting with:
+        \\
+        \\    sysctl kernel.perf_event_paranoid={[suggested]}
+        \\
+        \\or:
+        \\
+        \\    echo {[suggested]} > /proc/sys/kernel/perf_event_paranoid
+        \\
+        \\Different systems may need different values of perf_event_paranoid so try a lower value if {[suggested]} does
+        \\not work. This change can be made permanent by setting it in /etc/sysctl.conf.
+        \\
+    , .{ .current = paranoid_value, .suggested = paranoid_value - 1 });
 }
 
 const Measurement = struct {
